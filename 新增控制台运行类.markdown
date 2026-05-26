@@ -1,0 +1,2348 @@
+可以做到**不改变原始业务代码**。
+
+你只需要**新增 2 个文件**：
+
+```text
+src/main/java/com/example/gamerag/runner/ConsoleRagRunner.java
+src/main/resources/application-console.yml
+```
+
+原来的这些文件都不用改：
+
+```text
+RagService.java
+RagController.java
+BgeEmbeddingClient.java
+BgeRerankerClient.java
+MilvusRetrievalService.java
+QueryUnderstandingService.java
+application.yml
+```
+
+------
+
+# 一、新增控制台运行类
+
+新建包：
+
+```text
+src/main/java/com/example/gamerag/runner
+```
+
+新建文件：
+
+```text
+ConsoleRagRunner.java
+```
+
+完整代码如下：
+
+```java
+package com.example.gamerag.runner;
+
+import com.example.gamerag.dto.RagQueryRequest;
+import com.example.gamerag.dto.RagQueryResponse;
+import com.example.gamerag.dto.ReferenceDto;
+import com.example.gamerag.service.RagService;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.stereotype.Component;
+
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Scanner;
+
+@Component
+@ConditionalOnProperty(prefix = "rag.console", name = "enabled", havingValue = "true")
+public class ConsoleRagRunner implements CommandLineRunner {
+
+    private final RagService ragService;
+
+    @Value("${rag.console.game-id:}")
+    private String gameId;
+
+    @Value("${rag.console.top-k:6}")
+    private Integer topK;
+
+    @Value("${rag.console.debug:false}")
+    private Boolean debug;
+
+    public ConsoleRagRunner(RagService ragService) {
+        this.ragService = ragService;
+    }
+
+    @Override
+    public void run(String... args) {
+        printWelcome();
+
+        Scanner scanner = new Scanner(System.in, StandardCharsets.UTF_8.name());
+
+        while (true) {
+            System.out.print("\nRAG> ");
+
+            if (!scanner.hasNextLine()) {
+                break;
+            }
+
+            String input = scanner.nextLine().trim();
+
+            if (input.isBlank()) {
+                continue;
+            }
+
+            if (isExit(input)) {
+                System.out.println("已退出控制台 RAG。");
+                break;
+            }
+
+            if (handleCommand(input)) {
+                continue;
+            }
+
+            ask(input);
+        }
+    }
+
+    private void ask(String query) {
+        try {
+            RagQueryRequest request = new RagQueryRequest();
+            request.setQuery(query);
+            request.setTopK(topK);
+            request.setDebug(debug);
+            request.setBypassCache(false);
+
+            if (gameId != null && !gameId.isBlank()) {
+                request.setGameId(gameId);
+            }
+
+            RagQueryResponse response = ragService.query(request);
+
+            printAnswer(response);
+            printReferences(response);
+
+            if (Boolean.TRUE.equals(debug)) {
+                printDebug(response);
+            }
+
+        } catch (Exception e) {
+            System.out.println("\n[ERROR] 调用失败：");
+            System.out.println(e.getMessage());
+            e.printStackTrace(System.out);
+        }
+    }
+
+    private boolean handleCommand(String input) {
+        if (input.equalsIgnoreCase(":help")) {
+            printHelp();
+            return true;
+        }
+
+        if (input.equalsIgnoreCase(":config")) {
+            printConfig();
+            return true;
+        }
+
+        if (input.startsWith(":game ")) {
+            this.gameId = input.substring(":game ".length()).trim();
+            System.out.println("已设置 gameId = " + this.gameId);
+            return true;
+        }
+
+        if (input.equalsIgnoreCase(":game clear")) {
+            this.gameId = "";
+            System.out.println("已清空 gameId");
+            return true;
+        }
+
+        if (input.startsWith(":topk ")) {
+            String value = input.substring(":topk ".length()).trim();
+            try {
+                int parsed = Integer.parseInt(value);
+                if (parsed <= 0 || parsed > 20) {
+                    System.out.println("topK 建议设置为 1 到 20");
+                } else {
+                    this.topK = parsed;
+                    System.out.println("已设置 topK = " + this.topK);
+                }
+            } catch (NumberFormatException e) {
+                System.out.println("topK 必须是整数，例如：:topk 6");
+            }
+            return true;
+        }
+
+        if (input.equalsIgnoreCase(":debug on")) {
+            this.debug = true;
+            System.out.println("已开启 debug");
+            return true;
+        }
+
+        if (input.equalsIgnoreCase(":debug off")) {
+            this.debug = false;
+            System.out.println("已关闭 debug");
+            return true;
+        }
+
+        return false;
+    }
+
+    private void printAnswer(RagQueryResponse response) {
+        System.out.println("\n==================== 回答 ====================");
+        System.out.println(nullToEmpty(response.getAnswer()));
+
+        System.out.println("\n缓存命中：" + response.isCacheHit());
+    }
+
+    private void printReferences(RagQueryResponse response) {
+        if (response.getReferences() == null || response.getReferences().isEmpty()) {
+            System.out.println("\n==================== 引用片段 ====================");
+            System.out.println("无引用片段");
+            return;
+        }
+
+        System.out.println("\n==================== 引用片段 ====================");
+
+        for (ReferenceDto ref : response.getReferences()) {
+            System.out.println("[" + ref.getIndex() + "] " + nullToEmpty(ref.getTitle()));
+            System.out.println("ID: " + nullToEmpty(ref.getId()));
+            System.out.println("Score: " + ref.getScore());
+
+            if (ref.getSource() != null && !ref.getSource().isBlank()) {
+                System.out.println("Source: " + ref.getSource());
+            }
+
+            if (ref.getUrl() != null && !ref.getUrl().isBlank()) {
+                System.out.println("URL: " + ref.getUrl());
+            }
+
+            if (ref.getSnippet() != null && !ref.getSnippet().isBlank()) {
+                System.out.println("Snippet: " + ref.getSnippet());
+            }
+
+            System.out.println();
+        }
+    }
+
+    private void printDebug(RagQueryResponse response) {
+        System.out.println("\n==================== Debug ====================");
+
+        if (response.getQueryAnalysis() != null) {
+            System.out.println("Intent: " + response.getQueryAnalysis().getIntent());
+            System.out.println("Strategy: " + response.getQueryAnalysis().getStrategy());
+            System.out.println("RewrittenQuery: " + response.getQueryAnalysis().getRewrittenQuery());
+            System.out.println("ExpandedQueries: " + response.getQueryAnalysis().getExpandedQueries());
+            System.out.println("Keywords: " + response.getQueryAnalysis().getKeywords());
+            System.out.println("Entities: " + response.getQueryAnalysis().getEntities());
+            System.out.println("Filters: " + response.getQueryAnalysis().getFilters());
+        }
+
+        if (response.getDebug() != null && !response.getDebug().isEmpty()) {
+            System.out.println("DebugInfo: " + response.getDebug());
+        }
+    }
+
+    private void printWelcome() {
+        System.out.println("==================================================");
+        System.out.println("游戏知识库 RAG 控制台模式");
+        System.out.println("输入问题后回车即可检索和生成答案。");
+        System.out.println();
+        System.out.println("常用命令：");
+        System.out.println("  :help          查看帮助");
+        System.out.println("  :config        查看当前配置");
+        System.out.println("  :game xxx      设置 gameId");
+        System.out.println("  :game clear    清空 gameId");
+        System.out.println("  :topk 6        设置最终引用片段数量");
+        System.out.println("  :debug on      开启 debug 输出");
+        System.out.println("  :debug off     关闭 debug 输出");
+        System.out.println("  exit / quit    退出");
+        System.out.println("==================================================");
+        printConfig();
+    }
+
+    private void printHelp() {
+        System.out.println("\n命令说明：");
+        System.out.println("  直接输入问题：例如 黑龙第二阶段怎么打？");
+        System.out.println("  :game demo_game    设置当前游戏 ID");
+        System.out.println("  :topk 8            设置返回引用片段数量");
+        System.out.println("  :debug on          输出 Query 理解、检索计划、召回数量等信息");
+        System.out.println("  exit               退出程序");
+    }
+
+    private void printConfig() {
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("gameId", gameId);
+        config.put("topK", topK);
+        config.put("debug", debug);
+
+        System.out.println("\n当前控制台配置：");
+        config.forEach((k, v) -> System.out.println("  " + k + " = " + v));
+    }
+
+    private boolean isExit(String input) {
+        return "exit".equalsIgnoreCase(input)
+                || "quit".equalsIgnoreCase(input)
+                || ":exit".equalsIgnoreCase(input)
+                || ":quit".equalsIgnoreCase(input);
+    }
+
+    private String nullToEmpty(String value) {
+        return value == null ? "" : value;
+    }
+}
+```
+
+------
+
+# 二、新增控制台专用配置文件
+
+新建文件：
+
+```text
+src/main/resources/application-console.yml
+```
+
+完整内容如下：
+
+```yaml
+spring:
+  main:
+    web-application-type: none
+
+rag:
+  console:
+    enabled: true
+    game-id: demo_game
+    top-k: 6
+    debug: true
+```
+
+这里的作用是：
+
+```yaml
+spring:
+  main:
+    web-application-type: none
+```
+
+表示**不启动 Web 服务**，也就是不启动 8080 端口。
+
+```yaml
+rag:
+  console:
+    enabled: true
+```
+
+表示启用你刚才新增的 `ConsoleRagRunner`。
+
+------
+
+# 三、启动控制台模式
+
+## Windows CMD
+
+```bat
+chcp 65001
+
+java -Dfile.encoding=UTF-8 -jar target/game-rag-online-1.0.0.jar --spring.profiles.active=console
+```
+
+## Windows PowerShell
+
+```powershell
+$env:JAVA_TOOL_OPTIONS="-Dfile.encoding=UTF-8"
+
+java -jar target/game-rag-online-1.0.0.jar --spring.profiles.active=console
+```
+
+## IDEA 里运行
+
+在 Run Configuration 里配置：
+
+```text
+Program arguments:
+--spring.profiles.active=console
+```
+
+或者：
+
+```text
+VM options:
+-Dfile.encoding=UTF-8
+```
+
+------
+
+# 四、使用效果
+
+启动后控制台会显示：
+
+```text
+==================================================
+游戏知识库 RAG 控制台模式
+输入问题后回车即可检索和生成答案。
+
+常用命令：
+  :help          查看帮助
+  :config        查看当前配置
+  :game xxx      设置 gameId
+  :game clear    清空 gameId
+  :topk 6        设置最终引用片段数量
+  :debug on      开启 debug 输出
+  :debug off     关闭 debug 输出
+  exit / quit    退出
+==================================================
+
+当前控制台配置：
+  gameId = demo_game
+  topK = 6
+  debug = true
+
+RAG>
+```
+
+然后你可以直接输入：
+
+```text
+黑龙第二阶段怎么打？
+```
+
+输出类似：
+
+```text
+==================== 回答 ====================
+第二阶段需要先处理召唤物，然后观察 Boss 的蓄力动作……
+
+缓存命中：false
+
+==================== 引用片段 ====================
+[1] 黑龙 Boss 攻略
+ID: chunk_001
+Score: 0.91
+Source: wiki/boss.md
+Snippet: 黑龙进入第二阶段后，会释放范围火焰技能……
+
+[2] 黑龙机制说明
+ID: chunk_002
+Score: 0.87
+Source: guide/boss.md
+Snippet: 第二阶段的关键机制是……
+```
+
+------
+
+# 五、如果不想新建 `application-console.yml`
+
+也可以完全不加配置文件，启动时直接传参数：
+
+```bash
+java -Dfile.encoding=UTF-8 -jar target/game-rag-online-1.0.0.jar \
+  --spring.main.web-application-type=none \
+  --rag.console.enabled=true \
+  --rag.console.game-id=demo_game \
+  --rag.console.top-k=6 \
+  --rag.console.debug=true
+```
+
+Windows CMD 写成一行：
+
+```bat
+java -Dfile.encoding=UTF-8 -jar target/game-rag-online-1.0.0.jar --spring.main.web-application-type=none --rag.console.enabled=true --rag.console.game-id=demo_game --rag.console.top-k=6 --rag.console.debug=true
+```
+
+------
+
+# 六、是否改变了原始代码？
+
+不改变原始代码。
+
+你只是新增：
+
+```text
+ConsoleRagRunner.java
+application-console.yml
+```
+
+原来的后端接口仍然可以继续用：
+
+```text
+POST /api/rag/query
+```
+
+以后你想切回前后端模式，只要正常启动：
+
+```bash
+java -jar target/game-rag-online-1.0.0.jar
+```
+
+想用控制台模式，就启动：
+
+```bash
+java -jar target/game-rag-online-1.0.0.jar --spring.profiles.active=console
+```
+
+所以最终是：
+
+```text
+普通模式：Spring Boot Web 后端接口
+控制台模式：CommandLineRunner 命令行问答
+```
+
+两套模式共用同一个 `RagService`，不会破坏原有结构。
+
+需要改的核心点是：**你的 Milvus schema 已经不是原项目默认字段了**。
+
+原项目默认字段大概是：
+
+```text
+id
+title
+content
+source
+url
+game_id
+vector
+text_sparse
+doc_type
+version
+```
+
+你现在的 Milvus collection 是：
+
+```text
+id
+title
+chunk_id
+content
+content_dense_vector
+content_sparse_vector
+doc_id
+```
+
+所以代码主要改 4 处：
+
+```text
+1. application.yml：字段映射改成你的 Milvus 字段
+2. QueryUnderstandingService.java：不要再自动拼 game_id 过滤
+3. MilvusRetrievalService.java：dense/sparse 向量字段改成 content_dense_vector / content_sparse_vector
+4. 可选：ReferenceDto / RagService 增加 doc_id、chunk_id 返回
+```
+
+另外要特别注意：你写的是 `chunk-id`，但 **Milvus 资源/字段命名建议只能包含字母、数字和下划线，并且以字母或下划线开头**，不建议使用 `-`。Milvus 官方限制文档明确说命名只能包含数字、字母、下划线。([Milvus](https://milvus.io/docs/limitations.md?utm_source=chatgpt.com))
+
+所以建议你在 Milvus 中使用：
+
+```text
+chunk_id
+```
+
+不要使用：
+
+```text
+chunk-id
+```
+
+CSV 也建议同步改成：
+
+```csv
+id,title,chunk_id,content,content_dense_vector,content_sparse_vector,doc_id
+```
+
+------
+
+# 一、先确认你的 Milvus schema 应该这样
+
+建议 collection 字段如下：
+
+```text
+id                      VARCHAR / INT64，主键
+title                   VARCHAR
+chunk_id                INT64
+content                 VARCHAR，启用 analyzer
+content_dense_vector    FLOAT_VECTOR，维度 1024
+content_sparse_vector   SPARSE_FLOAT_VECTOR，由 Milvus BM25 Function 自动生成
+doc_id                  VARCHAR / INT64
+```
+
+其中：
+
+```text
+content_dense_vector
+```
+
+是 BGE-M3 生成的 dense 向量。
+
+```text
+content_sparse_vector
+```
+
+是 Milvus 根据 `content` 自动生成的 sparse 向量。Milvus 的 BM25 Function 会把原始文本字段转换为 BM25-compatible sparse vectors，并存入 sparse 字段。([Milvus](https://milvus.io/docs/full-text-search.md?utm_source=chatgpt.com))
+
+------
+
+# 二、修改一：改 `application.yml`
+
+文件：
+
+```text
+src/main/resources/application.yml
+```
+
+找到原来的：
+
+```yaml
+rag:
+  milvus:
+    endpoint: ${MILVUS_ENDPOINT:http://localhost:19530}
+    token: ${MILVUS_TOKEN:root:Milvus}
+    database: ${MILVUS_DATABASE:default}
+    collection: ${MILVUS_COLLECTION:game_knowledge}
+
+    primary-key-field: ${MILVUS_ID_FIELD:id}
+    text-field: ${MILVUS_TEXT_FIELD:content}
+    title-field: ${MILVUS_TITLE_FIELD:title}
+    source-field: ${MILVUS_SOURCE_FIELD:source}
+    url-field: ${MILVUS_URL_FIELD:url}
+    game-field: ${MILVUS_GAME_FIELD:game_id}
+    dense-vector-field: ${MILVUS_DENSE_FIELD:vector}
+    sparse-vector-field: ${MILVUS_SPARSE_FIELD:text_sparse}
+```
+
+改成：
+
+```yaml
+rag:
+  milvus:
+    endpoint: ${MILVUS_ENDPOINT:http://localhost:19530}
+    token: ${MILVUS_TOKEN:root:Milvus}
+    database: ${MILVUS_DATABASE:default}
+    collection: ${MILVUS_COLLECTION:wzry_knowledge}
+
+    primary-key-field: ${MILVUS_ID_FIELD:id}
+    text-field: ${MILVUS_TEXT_FIELD:content}
+    title-field: ${MILVUS_TITLE_FIELD:title}
+
+    # 你的 collection 没有 source/url/game_id，所以这里置空
+    source-field: ""
+    url-field: ""
+    game-field: ""
+
+    # 改成你的向量字段
+    dense-vector-field: ${MILVUS_DENSE_FIELD:content_dense_vector}
+    sparse-vector-field: ${MILVUS_SPARSE_FIELD:content_sparse_vector}
+
+    dense-search-enabled: true
+
+    # 如果你的 Milvus 已经配置了 BM25 Function，可以打开
+    sparse-search-enabled: true
+
+    # 如果 content 字段启用了 analyzer，可以打开 TEXT_MATCH
+    keyword-query-enabled: true
+
+    metric-type: COSINE
+    consistency-level: Bounded
+    dense-top-k: 30
+    sparse-top-k: 30
+    keyword-top-k: 30
+
+    keyword-filter-template: "TEXT_MATCH({textField}, '{keyword}')"
+
+    output-fields:
+      - id
+      - title
+      - chunk_id
+      - content
+      - doc_id
+```
+
+如果你现在还没有配好 Milvus BM25 Function，先改成：
+
+```yaml
+sparse-search-enabled: false
+```
+
+如果你的 `content` 字段没有启用 analyzer，先改成：
+
+```yaml
+keyword-query-enabled: false
+```
+
+第一次跑通时，建议先用：
+
+```yaml
+dense-search-enabled: true
+sparse-search-enabled: false
+keyword-query-enabled: false
+```
+
+跑通 dense 检索后，再打开 sparse 和 keyword。
+
+------
+
+# 三、修改二：改 `.env.example`
+
+文件：
+
+```text
+.env.example
+```
+
+找到原来的：
+
+```env
+MILVUS_COLLECTION=game_knowledge
+MILVUS_ID_FIELD=id
+MILVUS_TEXT_FIELD=content
+MILVUS_TITLE_FIELD=title
+MILVUS_SOURCE_FIELD=source
+MILVUS_URL_FIELD=url
+MILVUS_GAME_FIELD=game_id
+MILVUS_DENSE_FIELD=vector
+MILVUS_SPARSE_FIELD=text_sparse
+```
+
+改成：
+
+```env
+MILVUS_COLLECTION=wzry_knowledge
+MILVUS_ID_FIELD=id
+MILVUS_TEXT_FIELD=content
+MILVUS_TITLE_FIELD=title
+MILVUS_DENSE_FIELD=content_dense_vector
+MILVUS_SPARSE_FIELD=content_sparse_vector
+```
+
+把这些删掉或不用：
+
+```env
+MILVUS_SOURCE_FIELD=source
+MILVUS_URL_FIELD=url
+MILVUS_GAME_FIELD=game_id
+```
+
+因为你的 Milvus collection 没有这些字段。
+
+------
+
+# 四、修改三：改 `QueryUnderstandingService.java`
+
+文件：
+
+```text
+src/main/java/com/example/gamerag/service/QueryUnderstandingService.java
+```
+
+找到这个方法：
+
+```java
+private void mergeRequestFilters(QueryAnalysis analysis, String gameId, Map<String, String> requestFilters) {
+    Map<String, String> filters = new LinkedHashMap<>();
+    if (analysis.getFilters() != null) {
+        filters.putAll(analysis.getFilters());
+    }
+    if (requestFilters != null) {
+        filters.putAll(requestFilters);
+    }
+    if (gameId != null && !gameId.isBlank()) {
+        filters.put(properties.getMilvus().getGameField(), gameId);
+    }
+    analysis.setFilters(filters);
+}
+```
+
+改成：
+
+```java
+private void mergeRequestFilters(QueryAnalysis analysis, String gameId, Map<String, String> requestFilters) {
+    Map<String, String> filters = new LinkedHashMap<>();
+
+    if (analysis.getFilters() != null) {
+        filters.putAll(analysis.getFilters());
+    }
+
+    if (requestFilters != null) {
+        filters.putAll(requestFilters);
+    }
+
+    /*
+     * 原项目默认有 game_id 字段，所以会自动拼：
+     * game_id == "xxx"
+     *
+     * 现在你的 Milvus schema 没有 game_id 字段，所以只有在配置了 game-field 时才拼接。
+     */
+    String gameField = properties.getMilvus().getGameField();
+    if (gameField != null && !gameField.isBlank()
+            && gameId != null && !gameId.isBlank()) {
+        filters.put(gameField, gameId);
+    }
+
+    analysis.setFilters(filters);
+}
+```
+
+为什么要改？
+
+因为你的 collection 没有：
+
+```text
+game_id
+```
+
+如果你请求时传了：
+
+```json
+{
+  "gameId": "wzry"
+}
+```
+
+原代码会生成：
+
+```text
+game_id == "wzry"
+```
+
+然后 Milvus 会因为字段不存在而报错。
+
+------
+
+# 五、修改四：改 `MilvusRetrievalService.java`
+
+文件：
+
+```text
+src/main/java/com/example/gamerag/service/MilvusRetrievalService.java
+```
+
+这里主要检查 3 个地方。
+
+------
+
+## 1. dense 检索字段不用硬编码
+
+找到：
+
+```java
+Map<String, Object> body = baseSearchBody(
+        properties.getMilvus().getDenseVectorField(),
+        properties.getMilvus().getDenseTopK(),
+        filter
+);
+```
+
+这个不用改，只要你前面 `application.yml` 已经改成：
+
+```yaml
+dense-vector-field: content_dense_vector
+```
+
+它就会自动查：
+
+```text
+content_dense_vector
+```
+
+------
+
+## 2. sparse 检索字段不用硬编码
+
+找到：
+
+```java
+Map<String, Object> body = baseSearchBody(
+        properties.getMilvus().getSparseVectorField(),
+        properties.getMilvus().getSparseTopK(),
+        filter
+);
+```
+
+这个也不用改，只要你配置成：
+
+```yaml
+sparse-vector-field: content_sparse_vector
+```
+
+它就会自动查：
+
+```text
+content_sparse_vector
+```
+
+------
+
+## 3. 建议修改 sparseSearch 方法
+
+你现在如果使用 Milvus 自动 BM25 稀疏向量，建议把 `sparseSearch()` 改得更明确一些。
+
+找到原来的：
+
+```java
+private List<SearchHit> sparseSearch(String query, String filter) {
+    try {
+        if (properties.getMilvus().getSparseVectorField() == null || properties.getMilvus().getSparseVectorField().isBlank()) {
+            return List.of();
+        }
+        Map<String, Object> body = baseSearchBody(properties.getMilvus().getSparseVectorField(), properties.getMilvus().getSparseTopK(), filter);
+        // Sparse BM25 search usually does not need IVF/HNSW ANN parameters.
+        body.remove("searchParams");
+        // Milvus BM25 sparse field can accept the raw text query when the sparse vector field is generated by a BM25 function.
+        body.put("data", List.of(query));
+        return postSearch(body, RecallChannel.SPARSE_BM25);
+    } catch (Exception e) {
+        log.warn("sparse BM25 search failed for query='{}': {}", query, e.getMessage());
+        return List.of();
+    }
+}
+```
+
+改成：
+
+```java
+private List<SearchHit> sparseSearch(String query, String filter) {
+    try {
+        if (properties.getMilvus().getSparseVectorField() == null
+                || properties.getMilvus().getSparseVectorField().isBlank()) {
+            return List.of();
+        }
+
+        Map<String, Object> body = baseSearchBody(
+                properties.getMilvus().getSparseVectorField(),
+                properties.getMilvus().getSparseTopK(),
+                filter
+        );
+
+        /*
+         * 你的 schema：
+         * content -> Milvus BM25 Function -> content_sparse_vector
+         *
+         * 因此 sparse search 查询时可以传 raw query 文本，
+         * 由 Milvus 的 BM25 Function 处理成 sparse query vector。
+         */
+        body.put("data", List.of(query));
+
+        /*
+         * 如果你的 Milvus REST 服务要求显式指定 BM25，可以打开下面这段。
+         * 如果打开后报参数错误，就删掉 searchParams，交给 Milvus 按索引默认配置执行。
+         */
+        Map<String, Object> searchParams = new LinkedHashMap<>();
+        searchParams.put("metric_type", "BM25");
+        searchParams.put("params", Map.of());
+        body.put("searchParams", searchParams);
+
+        return postSearch(body, RecallChannel.SPARSE_BM25);
+
+    } catch (Exception e) {
+        log.warn("sparse BM25 search failed for query='{}': {}", query, e.getMessage());
+        return List.of();
+    }
+}
+```
+
+如果你运行时报：
+
+```text
+metric_type not supported
+```
+
+或者：
+
+```text
+searchParams invalid
+```
+
+那就把这几行删掉：
+
+```java
+Map<String, Object> searchParams = new LinkedHashMap<>();
+searchParams.put("metric_type", "BM25");
+searchParams.put("params", Map.of());
+body.put("searchParams", searchParams);
+```
+
+保留：
+
+```java
+body.put("data", List.of(query));
+```
+
+------
+
+# 六、修改五：改 `parseOneHit()` 里 source/url 不存在的问题
+
+文件：
+
+```text
+src/main/java/com/example/gamerag/service/MilvusRetrievalService.java
+```
+
+找到：
+
+```java
+hit.setTitle(readText(entity, properties.getMilvus().getTitleField()));
+hit.setContent(content);
+hit.setSource(readText(entity, properties.getMilvus().getSourceField()));
+hit.setUrl(readText(entity, properties.getMilvus().getUrlField()));
+```
+
+可以不改，因为你已经把：
+
+```yaml
+source-field: ""
+url-field: ""
+```
+
+设为空了，`readText()` 会返回 `null`。
+
+不过为了更清晰，建议改成：
+
+```java
+hit.setTitle(readText(entity, properties.getMilvus().getTitleField()));
+hit.setContent(content);
+
+String sourceField = properties.getMilvus().getSourceField();
+String urlField = properties.getMilvus().getUrlField();
+
+if (sourceField != null && !sourceField.isBlank()) {
+    hit.setSource(readText(entity, sourceField));
+}
+
+if (urlField != null && !urlField.isBlank()) {
+    hit.setUrl(readText(entity, urlField));
+}
+```
+
+这样更适合你的 schema。
+
+------
+
+# 七、修改六：推荐给返回结果增加 `doc_id` 和 `chunk_id`
+
+现在返回引用片段只有：
+
+```text
+id
+title
+source
+url
+score
+snippet
+```
+
+你的 schema 有：
+
+```text
+doc_id
+chunk_id
+```
+
+建议返回给前端或控制台。
+
+------
+
+## 1. 修改 `ReferenceDto.java`
+
+文件：
+
+```text
+src/main/java/com/example/gamerag/dto/ReferenceDto.java
+```
+
+找到原来的：
+
+```java
+public class ReferenceDto {
+    private int index;
+    private String id;
+    private String title;
+    private String source;
+    private String url;
+    private double score;
+    private String snippet;
+
+    // getter setter
+}
+```
+
+改成：
+
+```java
+package com.example.gamerag.dto;
+
+public class ReferenceDto {
+    private int index;
+    private String id;
+    private String title;
+    private String docId;
+    private String chunkId;
+    private String source;
+    private String url;
+    private double score;
+    private String snippet;
+
+    public int getIndex() { return index; }
+    public void setIndex(int index) { this.index = index; }
+
+    public String getId() { return id; }
+    public void setId(String id) { this.id = id; }
+
+    public String getTitle() { return title; }
+    public void setTitle(String title) { this.title = title; }
+
+    public String getDocId() { return docId; }
+    public void setDocId(String docId) { this.docId = docId; }
+
+    public String getChunkId() { return chunkId; }
+    public void setChunkId(String chunkId) { this.chunkId = chunkId; }
+
+    public String getSource() { return source; }
+    public void setSource(String source) { this.source = source; }
+
+    public String getUrl() { return url; }
+    public void setUrl(String url) { this.url = url; }
+
+    public double getScore() { return score; }
+    public void setScore(double score) { this.score = score; }
+
+    public String getSnippet() { return snippet; }
+    public void setSnippet(String snippet) { this.snippet = snippet; }
+}
+```
+
+------
+
+## 2. 修改 `RagService.java`
+
+文件：
+
+```text
+src/main/java/com/example/gamerag/service/RagService.java
+```
+
+找到：
+
+```java
+private List<ReferenceDto> toReferences(List<SearchHit> docs) {
+    List<ReferenceDto> refs = new ArrayList<>();
+    for (int i = 0; i < docs.size(); i++) {
+        SearchHit doc = docs.get(i);
+        ReferenceDto ref = new ReferenceDto();
+        ref.setIndex(i + 1);
+        ref.setId(doc.getId());
+        ref.setTitle(doc.getTitle());
+        ref.setSource(doc.getSource());
+        ref.setUrl(doc.getUrl());
+        ref.setScore(doc.getScore());
+        ref.setSnippet(TextUtils.truncate(doc.getContent(), 240));
+        refs.add(ref);
+    }
+    return refs;
+}
+```
+
+改成：
+
+```java
+private List<ReferenceDto> toReferences(List<SearchHit> docs) {
+    List<ReferenceDto> refs = new ArrayList<>();
+
+    for (int i = 0; i < docs.size(); i++) {
+        SearchHit doc = docs.get(i);
+
+        ReferenceDto ref = new ReferenceDto();
+        ref.setIndex(i + 1);
+        ref.setId(doc.getId());
+        ref.setTitle(doc.getTitle());
+
+        Object docId = doc.getMetadata().get("doc_id");
+        Object chunkId = doc.getMetadata().get("chunk_id");
+
+        ref.setDocId(docId == null ? null : String.valueOf(docId));
+        ref.setChunkId(chunkId == null ? null : String.valueOf(chunkId));
+
+        ref.setSource(doc.getSource());
+        ref.setUrl(doc.getUrl());
+        ref.setScore(doc.getScore());
+        ref.setSnippet(TextUtils.truncate(doc.getContent(), 240));
+
+        refs.add(ref);
+    }
+
+    return refs;
+}
+```
+
+这样接口返回里会多出：
+
+```json
+{
+  "docId": "D001",
+  "chunkId": "1"
+}
+```
+
+------
+
+# 八、修改七：控制台输出增加 doc_id / chunk_id
+
+如果你用了控制台模式，文件：
+
+```text
+src/main/java/com/example/gamerag/runner/ConsoleRagRunner.java
+```
+
+找到引用输出部分：
+
+```java
+System.out.println("[" + ref.getIndex() + "] " + nullToEmpty(ref.getTitle()));
+System.out.println("ID: " + nullToEmpty(ref.getId()));
+System.out.println("Score: " + ref.getScore());
+```
+
+改成：
+
+```java
+System.out.println("[" + ref.getIndex() + "] " + nullToEmpty(ref.getTitle()));
+System.out.println("ID: " + nullToEmpty(ref.getId()));
+System.out.println("Doc ID: " + nullToEmpty(ref.getDocId()));
+System.out.println("Chunk ID: " + nullToEmpty(ref.getChunkId()));
+System.out.println("Score: " + ref.getScore());
+```
+
+------
+
+# 九、修改八：CSV 生成向量代码也要同步字段名
+
+你之前的 CSV 字段是：
+
+```csv
+id,title,chunk-id,content,content_dense_vector,content_sparse_vector,doc_id
+```
+
+建议改成：
+
+```csv
+id,title,chunk_id,content,content_dense_vector,content_sparse_vector,doc_id
+```
+
+对应修改你生成向量的 Java 文件：
+
+```text
+GenerateWzryBgeM3Vectors.java
+```
+
+找到：
+
+```java
+table.requireColumn("chunk-id");
+```
+
+改成：
+
+```java
+table.requireColumn("chunk_id");
+```
+
+如果你之前 CSV 已经生成了 `chunk-id`，可以用 Excel 或脚本把表头改成 `chunk_id`。
+
+------
+
+# 十、请求接口时也要改
+
+原来你可能这样请求：
+
+```json
+{
+  "query": "孙权的被动技能是什么？",
+  "gameId": "wzry",
+  "topK": 6,
+  "debug": true
+}
+```
+
+现在你的 schema 没有 `game_id`，所以不要传 `gameId`。
+
+改成：
+
+```json
+{
+  "query": "孙权的被动技能是什么？",
+  "topK": 6,
+  "debug": true
+}
+```
+
+如果你想按文档过滤，可以用 `doc_id`：
+
+```json
+{
+  "query": "孙权的被动技能是什么？",
+  "topK": 6,
+  "debug": true,
+  "filters": {
+    "doc_id": "D001"
+  }
+}
+```
+
+如果你想按 chunk 过滤：
+
+```json
+{
+  "query": "孙权的被动技能是什么？",
+  "topK": 6,
+  "debug": true,
+  "filters": {
+    "chunk_id": "1"
+  }
+}
+```
+
+不过注意，如果 `chunk_id` 在 Milvus 里是 `INT64`，现在的 `RetrievalRouter` 会拼成：
+
+```text
+chunk_id == "1"
+```
+
+这对 INT64 不合适。为了避免类型问题，建议：
+
+```text
+doc_id 用 VARCHAR
+chunk_id 如果要过滤，最好也用 VARCHAR
+```
+
+或者暂时不要对 `chunk_id` 做过滤，只作为返回字段。
+
+------
+
+# 十一、最小可跑通配置推荐
+
+第一次测试建议这样：
+
+```yaml
+rag:
+  milvus:
+    collection: wzry_knowledge
+
+    primary-key-field: id
+    text-field: content
+    title-field: title
+    source-field: ""
+    url-field: ""
+    game-field: ""
+
+    dense-vector-field: content_dense_vector
+    sparse-vector-field: content_sparse_vector
+
+    dense-search-enabled: true
+    sparse-search-enabled: false
+    keyword-query-enabled: false
+
+    output-fields:
+      - id
+      - title
+      - chunk_id
+      - content
+      - doc_id
+```
+
+请求：
+
+```json
+{
+  "query": "孙权的被动技能是什么？",
+  "topK": 6,
+  "debug": true
+}
+```
+
+如果能返回：
+
+```json
+"rawHitCount": 大于 0
+"fusedHitCount": 大于 0
+```
+
+说明 dense 检索已经跑通。
+
+然后再打开：
+
+```yaml
+sparse-search-enabled: true
+```
+
+最后再打开：
+
+```yaml
+keyword-query-enabled: true
+```
+
+------
+
+# 十二、最终需要修改的文件汇总
+
+必须改：
+
+```text
+src/main/resources/application.yml
+src/main/java/com/example/gamerag/service/QueryUnderstandingService.java
+```
+
+建议改：
+
+```text
+src/main/java/com/example/gamerag/service/MilvusRetrievalService.java
+src/main/java/com/example/gamerag/dto/ReferenceDto.java
+src/main/java/com/example/gamerag/service/RagService.java
+```
+
+如果用了控制台模式，改：
+
+```text
+src/main/java/com/example/gamerag/runner/ConsoleRagRunner.java
+```
+
+如果用了生成向量的 Java 工具，改：
+
+```text
+GenerateWzryBgeM3Vectors.java
+```
+
+最关键的一句话：
+
+```text
+把原代码中所有面向 game_id / vector / text_sparse / source / url 的默认字段，
+改成你的 id / title / chunk_id / content / content_dense_vector / content_sparse_vector / doc_id 字段体系。
+```
+
+
+
+
+
+把关键字检索删掉，只保留两种向量检索，怎么修改。和对应哪里修改了。Milvus向量数据库如上，代码部分做出修改（如上）。加控制台模式的完整实现。给出修改后的完整项目代码文件。
+
+
+
+已按你的要求完成修改，并打包为完整项目代码：
+
+[下载完整项目代码：game-rag-wzry-vector-console.zip](sandbox:/mnt/data/game-rag-wzry-vector-console.zip)
+
+我这次做了三类修改：
+
+1. **删除关键字检索**
+2. **适配你的 Milvus 字段**
+3. **加入控制台模式完整实现**
+
+------
+
+## 一、关键字检索已经删除
+
+原来类似这些配置和逻辑都不再使用：
+
+```text
+keyword-query-enabled
+keyword-top-k
+keyword-filter-template
+TEXT_MATCH(...)
+KEYWORD_QUERY
+keywordQuery()
+```
+
+现在只保留两路检索：
+
+```text
+1. dense vector 检索
+   BGE-M3 query embedding -> content_dense_vector
+
+2. sparse vector 检索
+   query text -> Milvus BM25 Function -> content_sparse_vector
+```
+
+主要修改文件：
+
+```text
+src/main/java/com/example/gamerag/model/RecallChannel.java
+src/main/java/com/example/gamerag/model/RetrievalPlan.java
+src/main/java/com/example/gamerag/service/RetrievalRouter.java
+src/main/java/com/example/gamerag/service/MilvusRetrievalService.java
+src/main/resources/application.yml
+```
+
+其中 `RecallChannel.java` 现在只有：
+
+```java
+public enum RecallChannel {
+    DENSE_VECTOR,
+    SPARSE_VECTOR
+}
+```
+
+`MilvusRetrievalService.java` 现在只有：
+
+```java
+private List<SearchHit> denseSearch(String query, String filter)
+private List<SearchHit> sparseSearch(String query, String filter)
+```
+
+没有关键词查询方法了。
+
+------
+
+## 二、Milvus 字段已改成你的 schema
+
+你的 Milvus collection 字段是：
+
+```text
+id
+title
+chunk_id
+content
+content_dense_vector
+content_sparse_vector
+doc_id
+```
+
+对应修改在：
+
+```text
+src/main/resources/application.yml
+```
+
+现在配置为：
+
+```yaml
+rag:
+  milvus:
+    collection: ${MILVUS_COLLECTION:wzry_knowledge}
+
+    primary-key-field: ${MILVUS_ID_FIELD:id}
+    text-field: ${MILVUS_TEXT_FIELD:content}
+    title-field: ${MILVUS_TITLE_FIELD:title}
+    dense-vector-field: ${MILVUS_DENSE_FIELD:content_dense_vector}
+    sparse-vector-field: ${MILVUS_SPARSE_FIELD:content_sparse_vector}
+
+    dense-search-enabled: true
+    sparse-search-enabled: true
+
+    output-fields:
+      - id
+      - title
+      - chunk_id
+      - content
+      - doc_id
+```
+
+同时删除了原来的：
+
+```text
+source
+url
+game_id
+doc_type
+version
+```
+
+------
+
+## 三、控制台模式完整实现已加入
+
+新增文件：
+
+```text
+src/main/java/com/example/gamerag/runner/ConsoleRagRunner.java
+src/main/resources/application-console.yml
+```
+
+控制台模式启动：
+
+```bash
+mvn clean package -DskipTests
+java -Dfile.encoding=UTF-8 -jar target/game-rag-online-1.0.0.jar --spring.profiles.active=console
+```
+
+Windows CMD 建议先执行：
+
+```bat
+chcp 65001
+```
+
+启动后可以直接输入：
+
+```text
+孙权的被动技能是什么？
+```
+
+支持命令：
+
+```text
+:config        查看当前配置
+:topk 6        设置返回片段数量
+:debug on      开启 debug
+:debug off     关闭 debug
+:clear         清空缓存
+exit           退出
+```
+
+------
+
+## 四、项目中包含的主要文件
+
+```text
+game-rag-wzry-vector-console/
+├─ pom.xml
+├─ README.md
+├─ .env.example
+├─ data/
+│  └─ wzry_milvus_mock_50.csv
+├─ docs/
+│  └─ api.http
+└─ src/main/
+   ├─ resources/
+   │  ├─ application.yml
+   │  └─ application-console.yml
+   └─ java/com/example/gamerag/
+      ├─ config/
+      ├─ controller/
+      ├─ dto/
+      ├─ exception/
+      ├─ model/
+      ├─ runner/
+      │  └─ ConsoleRagRunner.java
+      ├─ service/
+      │  ├─ BgeEmbeddingClient.java
+      │  ├─ BgeRerankerClient.java
+      │  ├─ DoubaoClient.java
+      │  ├─ MilvusRetrievalService.java
+      │  ├─ QueryUnderstandingService.java
+      │  ├─ RagService.java
+      │  ├─ RetrievalRouter.java
+      │  ├─ RerankService.java
+      │  └─ RrfFusionService.java
+      └─ tools/
+         └─ GenerateWzryBgeM3Vectors.java
+```
+
+------
+
+## 五、怎么配置运行
+
+先配置 `.env.example` 里的内容，或直接改 `application.yml`。
+
+核心配置：
+
+```env
+DOUBAO_API_KEY=your_doubao_api_key
+DOUBAO_CHAT_MODEL=ep-your-doubao-chat-endpoint
+
+BGE_BASE_URL=http://127.0.0.1:9997/v1
+BGE_EMBEDDING_MODEL=BAAI/bge-m3
+
+BGE_RERANK_ENABLED=true
+BGE_RERANK_BASE_URL=http://127.0.0.1:9997/v1
+BGE_RERANK_MODEL=BAAI/bge-reranker-v2-m3
+
+MILVUS_ENDPOINT=http://localhost:19530
+MILVUS_TOKEN=root:Milvus
+MILVUS_COLLECTION=wzry_knowledge
+```
+
+如果暂时没有 reranker 服务，可以先关掉：
+
+```yaml
+rag:
+  reranker:
+    enabled: false
+```
+
+如果 sparse 检索暂时没配好，也可以先关掉：
+
+```yaml
+rag:
+  milvus:
+    dense-search-enabled: true
+    sparse-search-enabled: false
+```
+
+先跑通 dense，再打开 sparse。
+
+------
+
+## 六、Web 接口仍然保留
+
+普通 Web 模式启动：
+
+```bash
+mvn spring-boot:run
+```
+
+测试：
+
+```bash
+curl -X POST http://localhost:8080/api/rag/query \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "孙权的被动技能是什么？",
+    "topK": 6,
+    "debug": true
+  }'
+```
+
+返回结果里会包含：
+
+```json
+{
+  "references": [
+    {
+      "id": "001",
+      "title": "孙权",
+      "docId": "D001",
+      "chunkId": "1",
+      "score": 0.91,
+      "snippet": "..."
+    }
+  ]
+}
+```
+
+------
+
+## 七、向量生成工具也已放入项目
+
+文件：
+
+```text
+src/main/java/com/example/gamerag/tools/GenerateWzryBgeM3Vectors.java
+```
+
+它会读取：
+
+```text
+data/wzry_milvus_mock_50.csv
+```
+
+输出：
+
+```text
+data/wzry_milvus_mock_50_with_vectors.csv
+```
+
+运行：
+
+```bash
+mvn exec:java -Dexec.mainClass="com.example.gamerag.tools.GenerateWzryBgeM3Vectors"
+```
+
+注意：它只生成 `content_dense_vector`，`content_sparse_vector` 仍然留空，由 Milvus BM25 Function 自动生成。
+
+------
+
+当前沙箱没有 `mvn` 命令，所以我没有执行 Maven 编译；我已完成文件生成、关键字检索残留扫描和重新打包。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+已按你的要求做成**精简版完整项目代码**，可以直接下载：
+
+[下载完整项目：game-rag-vector-console.zip](sandbox:/mnt/data/game-rag-vector-console.zip)
+
+这个版本已经改成：
+
+```text
+控制台模式默认启动
+只保留 dense vector + sparse vector 两种向量检索
+删除 keyword 检索
+删除 filters
+删除 gameId / game_id
+删除 RetrievalRouter
+删除 keywords / intent / strategy / entities 等冗余字段
+适配你的 Milvus 字段：
+id,title,chunk_id,content,content_dense_vector,content_sparse_vector,doc_id
+```
+
+## 主要修改位置
+
+### 1. `application.yml`
+
+位置：
+
+```text
+src/main/resources/application.yml
+```
+
+已改成你的 Milvus schema：
+
+```yaml
+rag:
+  milvus:
+    collection: ${MILVUS_COLLECTION:wzry_knowledge}
+    primary-key-field: id
+    title-field: title
+    chunk-id-field: chunk_id
+    text-field: content
+    dense-vector-field: content_dense_vector
+    sparse-vector-field: content_sparse_vector
+    doc-id-field: doc_id
+
+    dense-search-enabled: true
+    sparse-search-enabled: true
+    output-fields:
+      - id
+      - title
+      - chunk_id
+      - content
+      - doc_id
+```
+
+同时默认关闭 Web：
+
+```yaml
+spring:
+  main:
+    web-application-type: none
+```
+
+------
+
+### 2. 删除 `RetrievalRouter`
+
+原来：
+
+```text
+RetrievalRouter.java
+```
+
+已不再需要。
+
+现在不做检索策略路由，直接固定执行：
+
+```text
+dense vector search
++
+sparse vector search
+```
+
+核心实现改到：
+
+```text
+src/main/java/com/example/gamerag/service/MilvusVectorRetrievalService.java
+```
+
+------
+
+### 3. 删除关键词检索
+
+原来逻辑包括：
+
+```text
+keyword query
+TEXT_MATCH
+keywords
+keyword-filter-template
+```
+
+现在都去掉了。
+
+`MilvusVectorRetrievalService.java` 只保留：
+
+```java
+denseVectorSearch(query)
+sparseVectorSearch(query)
+```
+
+没有 keyword 检索。
+
+------
+
+### 4. 删除 filters / gameId
+
+新的请求对象：
+
+```text
+src/main/java/com/example/gamerag/dto/RagQueryRequest.java
+```
+
+只保留：
+
+```java
+private String query;
+private Integer topK;
+private Boolean bypassCache;
+private Boolean debug;
+```
+
+已经删除：
+
+```java
+gameId
+filters
+```
+
+------
+
+### 5. Query 理解简化
+
+原来的：
+
+```text
+QueryAnalysis
+keywords
+intent
+strategy
+entities
+filters
+```
+
+已经删除。
+
+改成：
+
+```text
+src/main/java/com/example/gamerag/model/QueryRewriteResult.java
+```
+
+只保留：
+
+```java
+private String originalQuery;
+private String rewrittenQuery;
+private List<String> expandedQueries;
+```
+
+对应服务：
+
+```text
+src/main/java/com/example/gamerag/service/QueryRewriteService.java
+```
+
+------
+
+### 6. 控制台模式完整实现
+
+新增：
+
+```text
+src/main/java/com/example/gamerag/runner/ConsoleRagRunner.java
+```
+
+支持命令：
+
+```text
+:config
+:topk 6
+:debug on
+:debug off
+:cache clear
+exit
+quit
+```
+
+默认启动后直接进入：
+
+```text
+RAG>
+```
+
+输入例如：
+
+```text
+孙尚香一技能怎么用？
+```
+
+即可开始检索和生成。
+
+------
+
+## 运行方式
+
+进入项目目录：
+
+```bash
+cd game-rag-vector-console
+```
+
+配置环境变量，例如 Windows PowerShell：
+
+```powershell
+$env:DOUBAO_API_KEY="你的豆包APIKey"
+$env:DOUBAO_CHAT_MODEL="你的豆包接入点ID"
+
+$env:BGE_API_KEY="你的BGE API Key"
+$env:BGE_BASE_URL="https://api.siliconflow.cn/v1"
+$env:BGE_EMBEDDING_MODEL="BAAI/bge-m3"
+$env:BGE_RERANK_MODEL="BAAI/bge-reranker-v2-m3"
+
+$env:MILVUS_ENDPOINT="http://localhost:19530"
+$env:MILVUS_TOKEN="root:Milvus"
+$env:MILVUS_COLLECTION="wzry_knowledge"
+```
+
+编译运行：
+
+```bash
+mvn clean package -DskipTests
+java -Dfile.encoding=UTF-8 -jar target/game-rag-vector-console-1.0.0.jar
+```
+
+Windows CMD 先执行：
+
+```bat
+chcp 65001
+```
+
+再运行 jar。
+
+------
+
+## 如果 sparse 向量检索还没跑通
+
+先在 `application.yml` 中改成：
+
+```yaml
+rag:
+  milvus:
+    dense-search-enabled: true
+    sparse-search-enabled: false
+```
+
+先测试 dense 检索：
+
+```text
+BGE-M3 -> content_dense_vector
+```
+
+确认能返回结果后，再打开：
+
+```yaml
+sparse-search-enabled: true
+```
+
+测试：
+
+```text
+Milvus BM25 Function -> content_sparse_vector
+```
+
+------
+
+项目里也附带了说明文件：
+
+```text
+README.md
+docs/CHANGES.md
+```
+
+里面写了配置、运行方式和本次删除/保留的模块。
+
+
+
+把关键字检索删掉，只保留两种向量检索，怎么修改。和对应哪里修改了。Milvus向量数据库如上，代码部分做出修改（如上）。加控制台模式的完整实现。去掉多余字段（比如关键词，Retrivalrouter等用不到的模块），去掉filters。给出修改后的完整项目代码文件。
+
+
+
+已按你的要求做成**精简版完整项目代码**，可以直接下载：
+
+[下载完整项目：game-rag-vector-console.zip](sandbox:/mnt/data/game-rag-vector-console.zip)
+
+这个版本已经改成：
+
+```text
+控制台模式默认启动
+只保留 dense vector + sparse vector 两种向量检索
+删除 keyword 检索
+删除 filters
+删除 gameId / game_id
+删除 RetrievalRouter
+删除 keywords / intent / strategy / entities 等冗余字段
+适配你的 Milvus 字段：
+id,title,chunk_id,content,content_dense_vector,content_sparse_vector,doc_id
+```
+
+## 主要修改位置
+
+### 1. `application.yml`
+
+位置：
+
+```text
+src/main/resources/application.yml
+```
+
+已改成你的 Milvus schema：
+
+```yaml
+rag:
+  milvus:
+    collection: ${MILVUS_COLLECTION:wzry_knowledge}
+    primary-key-field: id
+    title-field: title
+    chunk-id-field: chunk_id
+    text-field: content
+    dense-vector-field: content_dense_vector
+    sparse-vector-field: content_sparse_vector
+    doc-id-field: doc_id
+
+    dense-search-enabled: true
+    sparse-search-enabled: true
+    output-fields:
+      - id
+      - title
+      - chunk_id
+      - content
+      - doc_id
+```
+
+同时默认关闭 Web：
+
+```yaml
+spring:
+  main:
+    web-application-type: none
+```
+
+------
+
+### 2. 删除 `RetrievalRouter`
+
+原来：
+
+```text
+RetrievalRouter.java
+```
+
+已不再需要。
+
+现在不做检索策略路由，直接固定执行：
+
+```text
+dense vector search
++
+sparse vector search
+```
+
+核心实现改到：
+
+```text
+src/main/java/com/example/gamerag/service/MilvusVectorRetrievalService.java
+```
+
+------
+
+### 3. 删除关键词检索
+
+原来逻辑包括：
+
+```text
+keyword query
+TEXT_MATCH
+keywords
+keyword-filter-template
+```
+
+现在都去掉了。
+
+`MilvusVectorRetrievalService.java` 只保留：
+
+```java
+denseVectorSearch(query)
+sparseVectorSearch(query)
+```
+
+没有 keyword 检索。
+
+------
+
+### 4. 删除 filters / gameId
+
+新的请求对象：
+
+```text
+src/main/java/com/example/gamerag/dto/RagQueryRequest.java
+```
+
+只保留：
+
+```java
+private String query;
+private Integer topK;
+private Boolean bypassCache;
+private Boolean debug;
+```
+
+已经删除：
+
+```java
+gameId
+filters
+```
+
+------
+
+### 5. Query 理解简化
+
+原来的：
+
+```text
+QueryAnalysis
+keywords
+intent
+strategy
+entities
+filters
+```
+
+已经删除。
+
+改成：
+
+```text
+src/main/java/com/example/gamerag/model/QueryRewriteResult.java
+```
+
+只保留：
+
+```java
+private String originalQuery;
+private String rewrittenQuery;
+private List<String> expandedQueries;
+```
+
+对应服务：
+
+```text
+src/main/java/com/example/gamerag/service/QueryRewriteService.java
+```
+
+------
+
+### 6. 控制台模式完整实现
+
+新增：
+
+```text
+src/main/java/com/example/gamerag/runner/ConsoleRagRunner.java
+```
+
+支持命令：
+
+```text
+:config
+:topk 6
+:debug on
+:debug off
+:cache clear
+exit
+quit
+```
+
+默认启动后直接进入：
+
+```text
+RAG>
+```
+
+输入例如：
+
+```text
+孙尚香一技能怎么用？
+```
+
+即可开始检索和生成。
+
+------
+
+## 运行方式
+
+进入项目目录：
+
+```bash
+cd game-rag-vector-console
+```
+
+配置环境变量，例如 Windows PowerShell：
+
+```powershell
+$env:DOUBAO_API_KEY="你的豆包APIKey"
+$env:DOUBAO_CHAT_MODEL="你的豆包接入点ID"
+
+$env:BGE_API_KEY="你的BGE API Key"
+$env:BGE_BASE_URL="https://api.siliconflow.cn/v1"
+$env:BGE_EMBEDDING_MODEL="BAAI/bge-m3"
+$env:BGE_RERANK_MODEL="BAAI/bge-reranker-v2-m3"
+
+$env:MILVUS_ENDPOINT="http://localhost:19530"
+$env:MILVUS_TOKEN="root:Milvus"
+$env:MILVUS_COLLECTION="wzry_knowledge"
+```
+
+编译运行：
+
+```bash
+mvn clean package -DskipTests
+java -Dfile.encoding=UTF-8 -jar target/game-rag-vector-console-1.0.0.jar
+```
+
+Windows CMD 先执行：
+
+```bat
+chcp 65001
+```
+
+再运行 jar。
+
+------
+
+## 如果 sparse 向量检索还没跑通
+
+先在 `application.yml` 中改成：
+
+```yaml
+rag:
+  milvus:
+    dense-search-enabled: true
+    sparse-search-enabled: false
+```
+
+先测试 dense 检索：
+
+```text
+BGE-M3 -> content_dense_vector
+```
+
+确认能返回结果后，再打开：
+
+```yaml
+sparse-search-enabled: true
+```
+
+测试：
+
+```text
+Milvus BM25 Function -> content_sparse_vector
+```
+
+------
+
+项目里也附带了说明文件：
+
+```text
+README.md
+docs/CHANGES.md
+```
+
+里面写了配置、运行方式和本次删除/保留的模块。
