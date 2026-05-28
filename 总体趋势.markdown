@@ -1,0 +1,581 @@
+下面按**近一年 RAG 研究主线**整理。这里的“近一年”以 **2025–2026 年公开论文、顶会/顶刊录用与活跃开源项目**为主；少量 2025 年早期论文也纳入，因为它们是这一年工程落地的核心方向。
+
+## 1. 总体趋势
+
+最新 RAG 系统已经从早期的“**向量库 top-k 检索 + rerank + 拼接上下文**”，发展为更复杂的系统工程：
+
+1. **检索前先决策**：是否检索、去哪检索、检索多少、用什么检索器。
+2. **知识库不再只是 chunk 向量库**：开始引入图结构、实体关系、层级摘要、多模态文档结构。
+3. **生成前先压缩上下文**：避免把大量无关 chunk 塞进 LLM，减少 token、降低延迟。
+4. **系统层加速**：KV cache、chunk cache、预取、并行检索、近内存计算等成为新热点。
+5. **多模态 RAG 快速发展**：PDF、表格、图像、公式、图表不再简单 OCR 后拼文本，而是作为结构化、多模态知识进入检索流程。
+
+------
+
+## 2. 与“加快检索时间和效率”最相关的论文方向
+
+| 方向                       | 代表论文/系统                                                | 核心思想                                                     | 对效率的价值                                                 |
+| -------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| **Adaptive-k 检索**        | *Efficient Context Selection for Long-Context QA*，EMNLP 2025 | 不固定 top-k，而是根据相似度分数动态决定取多少 passage；论文提出单次阈值方法，不需要额外 LLM 调用或微调。 | 显著减少送入 LLM 的 token；论文报告相比全上下文最多减少约 10 倍 token，同时保持较高相关 passage 保留率。([ACL Anthology](https://aclanthology.org/2025.emnlp-main.1017/)) |
+| **上下文剪枝 / 压缩**      | Provence，ICLR 2025                                          | 把 context pruning 建模为序列标注任务，在 rerank 的同时删除无关信息。 | 在生成前减少无关上下文，降低推理成本，并保持鲁棒性。([OpenReview](https://openreview.net/forum?id=TDy5Ih78b4)) |
+| **自适应上下文压缩**       | ACC-RAG，EMNLP Findings 2025                                 | 根据输入复杂度动态调整压缩率，包含分层压缩器和 context selector。 | 论文称相较标准 RAG 可获得超过 4 倍推理加速，同时保持或提升准确率。([arXiv](https://arxiv.org/html/2507.22931v1)) |
+| **检索源路由**             | RAGRoute，EuroMLSys 2025 / DAIS 2026                         | 在联邦 RAG 中，不再查询所有知识源，而是用轻量路由器选择相关数据源。 | 报告最高减少 80.65% 通信开销、52.50% 端到端延迟，同时保持接近全源查询的准确率。([arXiv](https://arxiv.org/abs/2502.19280)) |
+| **集合级 passage 选择**    | SetR，ACL 2025                                               | 不再逐条 passage 排名，而是选择一个能共同覆盖问题需求的证据集合。 | 减少冗余 chunk，提高上下文利用率；官方实现强调 set-level selection 在保持效率的同时提升生成质量。([ACL Anthology](https://aclanthology.org/2025.acl-long.861/?utm_source=chatgpt.com)) |
+| **KV cache 级 RAG 加速**   | TurboRAG，EMNLP 2025                                         | 对知识库 chunk 预先计算 KV cache，推理时拼接/重排 cache，而不是在线重复 prefill。 | 论文报告 TTFT 最多降低 9.4 倍，平均约 8.6 倍。([ACL Anthology](https://aclanthology.org/2025.emnlp-main.334/)) |
+| **RAG 缓存系统**           | RAGCache，ACM TOCS 2024/2025                                 | 缓存检索知识对应的中间状态，并使用多级 GPU/CPU cache 管理。  | 相比 vLLM + Faiss，报告 TTFT 最高降低 4 倍、吞吐最高提升 2.1 倍。([arXiv](https://arxiv.org/abs/2404.12457?utm_source=chatgpt.com)) |
+| **检索-生成并行预取**      | TeleRAG，2025                                                | 在 LLM 生成时预测后续需要的检索内容，并把数据从 CPU 预取到 GPU。 | 单 RTX 4090 + Llama-3 8B + 61GB datastore 场景下，报告平均延迟降低 1.53 倍、吞吐提升 1.83 倍。([arXiv](https://arxiv.org/html/2502.20969v3)) |
+| **硬件/近内存检索加速**    | IKS，ASPLOS 2025                                             | 用 CXL 近内存加速器卸载大规模精确向量检索。                  | 在 512GB 知识库上，论文报告精确近邻检索加速 13.4–27.9 倍，端到端推理加速 1.7–26.3 倍。([arg.csl.cornell.edu](https://arg.csl.cornell.edu/papers/iks-asplos2025.pdf)) |
+| **绕过检索的缓存增强生成** | CAG，WWW 2025                                                | 对受限知识库，将相关知识预加载进长上下文 LLM，并缓存运行时参数。 | 可消除检索延迟，但前提是知识库能放进模型上下文，适合小型/稳定知识库。([arXiv](https://arxiv.org/abs/2412.15605)) |
+
+**结论**：如果目标是“加快 RAG 检索和响应”，最值得优先落地的是：
+
+> **查询路由 + adaptive top-k + hybrid retrieval + rerank 后剪枝 + RAG 缓存**。
+> 如果是自部署大模型，再考虑 **KV cache / chunk cache / 预取**。
+
+------
+
+## 3. 知识库建立与检索的新方法
+
+### 3.1 从“平面 chunk”到“图结构知识库”
+
+传统 RAG 多数是：文档切块 → embedding → 向量库 top-k。近一年大量工作开始把知识库构造成**图 + 向量 + 原文 chunk**的混合结构。
+
+| 方法              | 核心做法                                                     | 适合场景                                                     |
+| ----------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| **LightRAG**      | 构建图结构索引，同时做低层实体/关系检索和高层主题/社区检索，并支持增量更新。 | 通用文档知识库、需要快速更新的系统。论文强调图结构与向量检索结合可提升响应速度和上下文相关性。 |
+| **KG2RAG**        | 先用语义检索得到种子 chunk，再用知识图谱扩展相关 chunk，并按 KG 关系组织上下文。 | 多跳问答、需要证据连贯性的场景。NAACL 2025 论文强调利用 chunk 间事实关系提升多样性和连贯性。([ACL Anthology](https://aclanthology.org/2025.naacl-long.449/)) |
+| **HippoRAG 2**    | 模拟长期记忆机制，用 Personalized PageRank 等方式在图结构中做记忆式检索。 | 需要持续学习、事实记忆、关联记忆的场景。ICML 2025 论文显示其在事实、sense-making 和 associative memory 任务上优于标准 RAG。([OpenReview](https://openreview.net/forum?id=LWH8yn4HS2)) |
+| **KAG / OpenSPG** | 通过 schema 约束知识构建，建立 KG 与 chunk 的互索引，再用逻辑形式指导混合推理和检索。 | 企业知识库、复杂事实问答、多跳推理。开源项目强调解决纯向量相似度的歧义和 GraphRAG/OpenIE 噪声问题。([GitHub](https://github.com/openspg/kag)) |
+| **GraphRAG 系列** | 将文档抽取为实体、关系、社区摘要，再做图引导检索和生成。     | 长文档集合、组织知识库、报告分析。GraphRAG 综述将流程概括为 graph-based indexing、graph-guided retrieval、graph-enhanced generation。([arXiv](https://arxiv.org/abs/2408.08921?utm_source=chatgpt.com)) |
+
+**工程启发**：
+如果你的知识库是游戏、医学、法律、企业制度这类“实体关系明显”的领域，不建议只做普通 chunk embedding。更好的结构是：
+
+```text
+文档原文 chunk
+  ↓
+实体 / 术语 / 技能 / 疾病 / 条款抽取
+  ↓
+关系图谱
+  ↓
+chunk_id ↔ entity_id ↔ relation ↔ document_id 互索引
+  ↓
+向量检索 + 稀疏检索 + 图扩展 + rerank
+```
+
+------
+
+### 3.2 从“单向量检索”到“混合检索 / 多表示检索”
+
+现在主流 RAG 不再只依赖 dense vector。更常见的是：
+
+```text
+dense 向量召回
++ sparse / BM25 / lexical 召回
++ multi-vector late interaction
++ reranker 精排
++ RRF / 加权融合
+```
+
+BGE-M3 这类模型很适合这一方向，因为它同时支持 dense retrieval、lexical matching 和 multi-vector interaction，并且支持多语言、多粒度检索。([bge-model.com](https://bge-model.com/bge/bge_m3.html?utm_source=chatgpt.com))
+
+**适合你之前 Java + Milvus / RAG 项目的做法**：
+
+```text
+Query
+  ↓
+Query 改写 / 意图识别
+  ↓
+dense embedding 检索 topN
+  ↓
+sparse lexical 检索 topN
+  ↓
+RRF 融合去重
+  ↓
+reranker 精排
+  ↓
+Adaptive-k / Context pruning
+  ↓
+LLM 生成
+```
+
+其中提速点不只是“向量库快”，而是**减少无效召回、减少 rerank 数量、减少进入 LLM 的 token**。
+
+------
+
+### 3.3 从“普通 PDF OCR”到“结构化文档解析”
+
+很多 RAG 系统效果差，不是检索器不行，而是知识库构建阶段把文档结构破坏了。近一年非常重要的趋势是：**文档解析成为 RAG 的核心模块**。
+
+| 项目             | 作用                 | 特点                                                         |
+| ---------------- | -------------------- | ------------------------------------------------------------ |
+| **Docling**      | 文档转换与结构化解析 | IBM 开源工具，面向 PDF、Office 等文档，输出结构化表示；使用版面分析和表格结构识别，并能集成 LangChain、LlamaIndex 等生态。([IBM Research](https://research.ibm.com/publications/docling-an-efficient-open-source-toolkit-for-ai-driven-document-conversion)) |
+| **MinerU2.5**    | 高分辨率复杂文档解析 | 关注公式、表格、阅读顺序、复杂版面，在 OmniDocBench 上优于通用 VLM 和部分专用模型。([arXiv](https://arxiv.org/html/2509.22186v1)) |
+| **RAGFlow**      | 端到端文档理解 + RAG | 支持 Word、PPT、Excel、图片、扫描件、网页等异构数据，提供模板化 chunking、可追踪引用和 grounded citation。([GitHub](https://github.com/infiniflow/ragflow)) |
+| **RAG-Anything** | 多模态文档 RAG       | 以双图结构捕获跨模态关系和文本语义，支持文本、图片、表格、公式、图表等统一检索。([arXiv](https://arxiv.org/html/2510.12323v1)) |
+
+**工程启发**：
+知识库构建不要直接：
+
+```text
+PDF → 纯文本 → 固定长度切块
+```
+
+更推荐：
+
+```text
+PDF / Word / PPT / Excel / 图片
+  ↓
+版面解析：标题、段落、表格、公式、图像、页码、章节层级
+  ↓
+结构化 chunk：
+  - section_id
+  - page_id
+  - title_path
+  - table_id
+  - figure_caption
+  - source_doc
+  - chunk_type
+  ↓
+多粒度索引：
+  - chunk 向量
+  - section 摘要向量
+  - document 摘要向量
+  - 实体/关系图谱
+  - BM25 / sparse index
+```
+
+这样后续检索速度和准确率都会更好，因为 metadata filter、section-level routing、parent-child retrieval 都能减少无效候选。
+
+------
+
+## 4. 重点开源项目调研
+
+| 项目                   | 类型              | 适合用途                                                     |
+| ---------------------- | ----------------- | ------------------------------------------------------------ |
+| **FlashRAG**           | RAG 研究工具包    | 包含大量 benchmark、检索器、reranker、generator、compressor 和多种 SOTA RAG 算法，适合复现实验与比较方法。官方说明包含 36 个预处理数据集和 23 个 RAG 算法。([GitHub](https://github.com/RUC-NLPIR/FlashRAG)) |
+| **LightRAG**           | 轻量图增强 RAG    | 适合把普通知识库升级为 graph + vector 双检索结构；支持增量更新。 |
+| **Microsoft GraphRAG** | 图谱化 RAG 框架   | 适合长文档集合、组织级知识库和需要全局摘要/社区摘要的场景；项目定位是从非结构化文本抽取结构化数据并辅助问答。([GitHub](https://github.com/microsoft/graphrag?utm_source=chatgpt.com)) |
+| **OpenSPG / KAG**      | KG + RAG 推理系统 | 适合企业知识库、多跳事实问答、 schema 约束知识构建。([GitHub](https://github.com/openspg/kag)) |
+| **HippoRAG**           | 记忆式图检索 RAG  | 适合事实记忆、持续学习、跨文档关联检索。([OpenReview](https://openreview.net/forum?id=LWH8yn4HS2)) |
+| **RAGFlow**            | 工程化 RAG 平台   | 适合快速搭建文档知识库，尤其是复杂文档解析、chunking、引用追踪。([GitHub](https://github.com/infiniflow/ragflow)) |
+| **RAG-Anything**       | 多模态 RAG 框架   | 适合处理论文、教材、PPT、图表、公式、表格混合数据。([GitHub](https://github.com/hkuds/rag-anything)) |
+| **Docling / MinerU**   | 文档解析工具      | 更偏知识库构建前处理，可作为 RAG ingestion pipeline 的第一层。([IBM Research](https://research.ibm.com/publications/docling-an-efficient-open-source-toolkit-for-ai-driven-document-conversion)) |
+| **RAGRoute**           | 检索路由系统      | 适合多数据源、多知识库、联邦 RAG 场景。官方代码展示了 coordinator、router、data sources 的结构。([GitHub](https://github.com/sacs-epfl/ragroute)) |
+| **CAG**                | 缓存增强生成      | 适合知识库小且稳定的场景，可将知识预加载到长上下文模型中，绕过常规检索。([GitHub](https://github.com/hhhuang/CAG)) |
+
+------
+
+## 5. 可以总结出的“新一代高效 RAG 架构”
+
+比较推荐的系统结构如下：
+
+```text
+1. 离线知识库构建
+   文档解析 Docling / MinerU / RAGFlow
+   ↓
+   结构化 chunk：标题、页码、章节、表格、图片、公式、来源
+   ↓
+   多粒度索引：
+      - dense vector
+      - sparse / BM25
+      - section/document summary
+      - entity-relation graph
+      - metadata index
+   ↓
+   可选：预计算 chunk 摘要、rerank 特征、KV cache
+
+2. 在线 Query 理解
+   Query 分类
+   Query 改写
+   关键词/实体抽取
+   检索路由：选择知识库、collection、字段、图谱子域
+
+3. 高效召回
+   dense topN
+   sparse topN
+   graph expansion
+   metadata filter
+   RRF 融合去重
+
+4. 精排与压缩
+   reranker topM
+   Adaptive-k
+   Provence / ACC-RAG 类 context pruning
+   冗余 chunk 去重
+
+5. 生成
+   prompt 组装
+   引用追踪
+   可选 KV cache / RAGCache / TurboRAG 类加速
+```
+
+------
+
+## 6. 对你的项目最有参考价值的落地方向
+
+结合你之前做的 **Java + SpringBoot + Milvus + BGE-M3 + reranker + 游戏知识库 RAG**，优先级建议如下：
+
+### 第一优先级：混合检索 + RRF + rerank
+
+你已经有 dense vector 和 sparse vector 的设想，建议正式做成：
+
+```text
+BGE-M3 dense embedding
++ BGE-M3 sparse lexical vector
++ RRF 融合
++ bge-reranker 精排
+```
+
+这是最稳、最容易落地、收益最大的方案。
+
+------
+
+### 第二优先级：Adaptive-k 减少 LLM 上下文
+
+不要固定传 top-5 或 top-10。可以根据 rerank 分数动态截断，例如：
+
+```text
+如果 top1 分数很高，且 top2/top3 明显下降 → 只取 top1~top2
+如果多个 chunk 分数接近 → 取更多
+如果整体分数低 → 触发 Query 改写或二次检索
+```
+
+这对应 Adaptive-k / context selection 方向，可以直接减少 token 和生成延迟。
+
+------
+
+### 第三优先级：Query Router
+
+游戏知识库很适合路由，例如：
+
+```text
+英雄技能类 → hero_skill collection
+装备类 → item collection
+铭文类 → rune collection
+版本更新类 → patch_note collection
+玩法攻略类 → strategy collection
+```
+
+这样比所有 collection 全量检索更快，也更容易控制误召回。RAGRoute 的思想可以直接迁移到这种场景。
+
+------
+
+### 第四优先级：知识图谱增强
+
+王者荣耀这类游戏知识库天然适合图结构：
+
+```text
+英雄 → 技能
+英雄 → 定位
+英雄 → 克制英雄
+装备 → 属性
+装备 → 适合英雄
+技能 → 控制类型
+版本 → 改动对象
+```
+
+查询“孙权适合什么装备，为什么”时，不应该只靠向量相似度，而应通过图关系扩展：
+
+```text
+孙权 → 定位 → 推荐装备 → 属性 → 技能机制
+```
+
+可以参考 LightRAG、KAG、KG2RAG 的思路。
+
+------
+
+### 第五优先级：缓存
+
+至少做三层缓存：
+
+```text
+Query 结果缓存：
+原始问题 / 改写问题 → 检索结果
+
+Rerank 缓存：
+query + chunk_id → rerank score
+
+Answer 缓存：
+高频问题 → 最终答案
+```
+
+如果后续自部署 LLM，再考虑 RAGCache / TurboRAG 这类 KV cache 级优化。
+
+------
+
+## 7. 最后归纳
+
+近一年高效 RAG 的关键不在于单点优化，而是：
+
+```text
+少查：Query Router / source routing
+准查：hybrid retrieval / graph retrieval
+少传：Adaptive-k / context pruning / compression
+快传：cache / prefetch / KV reuse
+好建库：结构化解析 / 多粒度索引 / 图谱化知识库
+```
+
+对工程项目来说，最推荐的路线是：
+
+```text
+Docling/MinerU/RAGFlow 式文档解析
++ BGE-M3 混合检索
++ RRF 融合
++ bge-reranker 精排
++ Adaptive-k 截断
++ LightRAG/KAG 式图谱增强
++ Query/Rerank/Answer 缓存
+```
+
+这套路线比单纯“调大 top-k、换更强 embedding 模型”更有效，也更接近 2025–2026 年 RAG 顶会论文和开源项目的发展方向。
+
+
+
+
+
+下面是上一轮提到的主要论文和项目地址。我把它们分成 **检索加速 / 高效检索**、**知识库构建与 GraphRAG**、**文档解析与多模态 RAG**、**通用 RAG 工具箱** 四类。
+
+------
+
+## 一、检索加速、检索效率相关
+
+| 名称                                                         | 论文地址                                                     | 项目地址                                                     |
+| ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| **Adaptive-k Retrieval / Efficient Context Selection for Long-Context QA** | [ACL Anthology](https://aclanthology.org/2025.emnlp-main.1017/) / [arXiv](https://arxiv.org/abs/2506.08479) | [GitHub: megagonlabs/adaptive-k-retrieval](https://github.com/megagonlabs/adaptive-k-retrieval) |
+| **Provence: Context Pruning for RAG**                        | [OpenReview](https://openreview.net/forum?id=TDy5Ih78b4) / [arXiv](https://arxiv.org/abs/2501.16214) | 官方代码我没有确认到；可参考第三方实现 [OpenProvence](https://github.com/hotchpotch/open_provence) |
+| **ACC-RAG: Adaptive Context Compression for RAG**            | [ACL Anthology](https://aclanthology.org/2025.findings-emnlp.1307/) / [arXiv](https://arxiv.org/abs/2507.22931) | 暂未确认到官方 GitHub                                        |
+| **RAGRoute: Efficient Federated Search for RAG**             | [ACM DL](https://dl.acm.org/doi/10.1145/3721146.3721942)     | [GitHub: sacs-epfl/ragroute](https://github.com/sacs-epfl/ragroute) |
+| **SetR: Shifting from Ranking to Set Selection for RAG**     | [ACL Anthology](https://aclanthology.org/2025.acl-long.861/) | [GitHub: LGAI-Research/SetR](https://github.com/LGAI-Research/SetR) |
+| **TurboRAG: Precomputed KV Cache for Chunked Text**          | [ACL Anthology](https://aclanthology.org/2025.emnlp-main.334/) / [OpenReview](https://openreview.net/forum?id=x7NbaU8RSU) | [GitHub: MooreThreads/TurboRAG](https://github.com/MooreThreads/TurboRAG) |
+| **RAGCache: Efficient Knowledge Caching for RAG**            | [arXiv](https://arxiv.org/abs/2404.12457)                    | 暂未确认到官方 GitHub                                        |
+| **TeleRAG: Lookahead Retrieval**                             | [arXiv](https://arxiv.org/abs/2502.20969) / [项目页](https://syfi.cs.washington.edu/publications/telerag/) | [GitHub: uw-syfi/TeleRAG](https://github.com/uw-syfi/TeleRAG) |
+| **IKS: Accelerating Retrieval-Augmented Generation**         | [ASPLOS 2025 PDF](https://arg.csl.cornell.edu/papers/iks-asplos2025.pdf) / [ACM DL](https://dl.acm.org/doi/10.1145/3669940.3707264) | 暂未确认到官方 GitHub                                        |
+| **CAG: Cache-Augmented Generation**                          | [arXiv](https://arxiv.org/abs/2412.15605)                    | [GitHub: hhhuang/CAG](https://github.com/hhhuang/CAG) / [IBM CAG Granite](https://github.com/IBM/Cache-Augmented-Generation-Granite) |
+
+相关来源：Adaptive-k、Provence、ACC-RAG、RAGRoute、SetR、TurboRAG、TeleRAG、RAGCache、IKS、CAG 的论文页或项目页分别说明了它们的核心目标是动态选择上下文、剪枝、压缩、路由、缓存或预取，以降低 RAG 检索与生成成本。([ACL Anthology](https://aclanthology.org/2025.emnlp-main.1017/?utm_source=chatgpt.com))
+
+------
+
+## 二、知识库构建、GraphRAG、知识图谱增强检索
+
+| 名称                                   | 论文地址                                                     | 项目地址                                                     |
+| -------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| **LightRAG: Simple and Fast RAG**      | [arXiv](https://arxiv.org/abs/2410.05779) / [项目主页](https://lightrag.github.io/) | [GitHub: HKUDS/LightRAG](https://github.com/HKUDS/LightRAG)  |
+| **KG2RAG: Knowledge Graph-Guided RAG** | [ACL Anthology](https://aclanthology.org/2025.naacl-long.449/) / [arXiv](https://arxiv.org/abs/2502.06864) | [GitHub: nju-websoft/KG2RAG](https://github.com/nju-websoft/KG2RAG) |
+| **HippoRAG 2**                         | [OpenReview](https://openreview.net/forum?id=LWH8yn4HS2) / [arXiv](https://arxiv.org/abs/2502.14802) | [GitHub: OSU-NLP-Group/HippoRAG](https://github.com/OSU-NLP-Group/HippoRAG) |
+| **KAG / OpenSPG**                      | [arXiv](https://arxiv.org/abs/2409.13731)                    | [GitHub: OpenSPG/KAG](https://github.com/OpenSPG/KAG)        |
+| **Microsoft GraphRAG**                 | [官方文档](https://microsoft.github.io/graphrag/)            | [GitHub: microsoft/graphrag](https://github.com/microsoft/graphrag) |
+| **GraphRAG Survey**                    | [arXiv](https://arxiv.org/abs/2501.13958)                    | [Awesome-GraphRAG](https://github.com/DEEP-PolyU/Awesome-GraphRAG) |
+
+这些方向的共同点是：不再只依赖普通向量相似度，而是把文档中的实体、关系、章节、社区摘要或知识图谱结构加入检索。LightRAG 强调低层/高层双级图检索，KG2RAG 用 KG 扩展和组织 chunk，HippoRAG 2 用 Personalized PageRank 等图算法模拟长期记忆，KAG 则强调 schema 与逻辑形式约束的专业领域问答。([lightrag.github.io](https://lightrag.github.io/?utm_source=chatgpt.com))
+
+------
+
+## 三、文档解析、多模态知识库、多模态 RAG
+
+| 名称                   | 论文地址                                                     | 项目地址                                                     |
+| ---------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| **Docling**            | [arXiv](https://arxiv.org/abs/2501.17887) / [IBM Research](https://research.ibm.com/publications/docling-an-efficient-open-source-toolkit-for-ai-driven-document-conversion) | [GitHub: docling-project/docling](https://github.com/docling-project/docling) / [文档](https://docling-project.github.io/docling/) |
+| **MinerU / MinerU2.5** | [MinerU2.5 arXiv](https://arxiv.org/abs/2509.22186)          | [GitHub: opendatalab/MinerU](https://github.com/opendatalab/MinerU) |
+| **RAG-Anything**       | [arXiv](https://arxiv.org/abs/2510.12323)                    | [GitHub: HKUDS/RAG-Anything](https://github.com/HKUDS/RAG-Anything) |
+| **RAGFlow**            | 项目型系统，论文地址暂未确认                                 | [GitHub: infiniflow/ragflow](https://github.com/infiniflow/ragflow) |
+
+这一类主要解决“知识库怎么建”的问题，尤其适合 PDF、Word、PPT、Excel、扫描件、图表、公式、表格混合的知识库。Docling 面向通用文档结构化转换，MinerU2.5 强调高分辨率复杂文档解析，RAG-Anything 进一步把文本、图片、表格、公式等统一为多模态可检索知识。([arXiv](https://arxiv.org/abs/2501.17887?utm_source=chatgpt.com))
+
+------
+
+## 四、通用 RAG 工具箱、评测框架、Embedding/Rerank 相关
+
+| 名称                   | 论文/说明地址                                                | 项目地址                                                     |
+| ---------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| **FlashRAG**           | [ACM DL](https://dl.acm.org/doi/10.1145/3701716.3715313)     | [GitHub: RUC-NLPIR/FlashRAG](https://github.com/RUC-NLPIR/FlashRAG) |
+| **BGE-M3**             | [BGE 文档](https://bge-model.com/bge/bge_m3.html) / [HuggingFace](https://huggingface.co/BAAI/bge-m3) | [GitHub: FlagOpen/FlagEmbedding](https://github.com/FlagOpen/FlagEmbedding) |
+| **Awesome RAG**        | 资源列表                                                     | [GitHub: liunian-Jay/Awesome-RAG](https://github.com/liunian-Jay/Awesome-RAG) |
+| **Awesome GraphRAG**   | 资源列表                                                     | [GitHub: DEEP-PolyU/Awesome-GraphRAG](https://github.com/DEEP-PolyU/Awesome-GraphRAG) |
+| **Awesome Papers RAG** | 资源列表                                                     | [GitHub: USTCAGI/Awesome-Papers-Retrieval-Augmented-Generation](https://github.com/USTCAGI/Awesome-Papers-Retrieval-Augmented-Generation) |
+
+FlashRAG 更适合复现实验和比较 RAG 方法；BGE-M3 对工程实现尤其有价值，因为它支持 dense retrieval、lexical matching 和 multi-vector interaction，适合做“稠密向量 + 稀疏向量 + 多向量”的混合检索。([ACM数字图书馆](https://dl.acm.org/doi/10.1145/3701716.3715313?utm_source=chatgpt.com))
+
+------
+
+## 五、如果只挑与你的 Java/SpringBoot + Milvus RAG 项目最相关的
+
+建议优先看这些：
+
+1. **BGE-M3**
+   https://github.com/FlagOpen/FlagEmbedding
+   用来做 dense + sparse + multi-vector 混合检索。
+2. **SetR**
+   https://github.com/LGAI-Research/SetR
+   学习“不是单条 chunk 排名，而是选证据集合”。
+3. **Adaptive-k Retrieval**
+   https://github.com/megagonlabs/adaptive-k-retrieval
+   学习动态 top-k，减少进入 LLM 的上下文。
+4. **LightRAG**
+   https://github.com/HKUDS/LightRAG
+   学习图结构知识库与向量检索结合。
+5. **KG2RAG**
+   https://github.com/nju-websoft/KG2RAG
+   学习“向量召回种子 chunk + 知识图谱扩展”。
+6. **RAGRoute**
+   https://github.com/sacs-epfl/ragroute
+   学习多知识库、多 collection 场景下的路由检索。
+7. **FlashRAG**
+   https://github.com/RUC-NLPIR/FlashRAG
+   用来调研和复现更多 RAG 方法。
+
+
+
+
+
+你说的 **Vector Graph RAG** 这一类，重点看下面这些开源项目。它们都属于“**向量检索 + 图结构 / 图遍历 / 多跳推理**”方向。
+
+## 最像 Vector Graph RAG 的项目
+
+| 项目                            | 类型                           | 适合看什么                                                   | 地址                                                         |
+| ------------------------------- | ------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| **zilliztech/vector-graph-rag** | 纯向量库实现 GraphRAG 思路     | 最接近你说的 Vector Graph RAG。它用 Milvus 做多跳检索，不依赖独立图数据库，适合你已有 Milvus 的项目参考。 | ([GitHub](https://github.com/zilliztech/vector-graph-rag?utm_source=chatgpt.com)) |
+| **DataStax graph-rag**          | Vector Store + Graph Traversal | 把向量检索和基于 metadata 的图遍历结合起来，不一定要单独建 Neo4j。适合学习“在现有向量库上做图遍历”。 | ([GitHub](https://github.com/datastax/graph-rag?utm_source=chatgpt.com)) |
+| **LightRAG**                    | Graph + Vector 混合 RAG        | 构建实体、关系图，再结合向量检索；有 Web UI 和 API，适合快速跑通 graph-enhanced RAG。 | ([GitHub](https://github.com/hkuds/lightrag?utm_source=chatgpt.com)) |
+| **Microsoft GraphRAG**          | 官方经典 GraphRAG 框架         | 偏“文档 → 实体关系图 → 社区摘要 → 全局/局部检索”。适合学习标准 GraphRAG 流程。 | ([GitHub](https://github.com/microsoft/graphrag?utm_source=chatgpt.com)) |
+| **Neo4j GraphRAG Python**       | Neo4j + Vector + GraphRAG      | 如果你想用真正图数据库做实体关系、多跳查询，可以看这个。     | ([GitHub](https://github.com/neo4j/neo4j-graphrag-python?utm_source=chatgpt.com)) |
+| **KG2RAG**                      | Knowledge Graph-Guided RAG     | NAACL 2025 项目，先语义检索种子 chunk，再通过知识图谱扩展和组织证据。 | ([GitHub](https://github.com/nju-websoft/KG2RAG?utm_source=chatgpt.com)) |
+| **HippoRAG / HippoRAG 2**       | 图记忆式 RAG                   | 用知识图谱和 Personalized PageRank 模拟长期记忆，适合多跳关联检索。 | ([GitHub](https://github.com/osu-nlp-group/hipporag?utm_source=chatgpt.com)) |
+| **OpenSPG / KAG**               | 知识图谱 + 逻辑推理 RAG        | 更偏企业级、专业领域知识图谱问答，强调 schema、逻辑形式和多跳事实问答。 | ([GitHub](https://github.com/openspg/kag?utm_source=chatgpt.com)) |
+| **Memgraph GraphRAG demos**     | 图数据库 + 向量检索 Demo       | Memgraph 是高性能内存图数据库，官方有 GraphRAG demo，适合学习图数据库侧实现。 | ([GitHub](https://github.com/memgraph/memgraph?utm_source=chatgpt.com)) |
+| **LlamaIndex GraphRAG**         | 框架级 GraphRAG 示例           | 用 LlamaIndex PropertyGraph + Neo4j + embedding retrieval 搭 GraphRAG，适合做原型。 | ([Developer Documentation](https://developers.llamaindex.ai/python/examples/cookbooks/graphrag_v2/?utm_source=chatgpt.com)) |
+
+------
+
+## 如果你的重点是 Milvus / Java RAG，优先看这 4 个
+
+### 1. zilliztech/vector-graph-rag
+
+这个最应该先看。它的特点是：
+
+```text
+不单独使用 Neo4j / Memgraph
+只用 Milvus 做向量检索
+通过多轮向量搜索模拟图上的多跳扩展
+适合多跳问答
+```
+
+它和你的项目最接近，因为你之前的方案里已经用了 **Milvus + BGE-M3 + Reranker**。这个项目可以借鉴它的“多跳检索流程”，然后用 Java 重写服务层。([GitHub](https://github.com/zilliztech/vector-graph-rag?utm_source=chatgpt.com))
+
+------
+
+### 2. DataStax graph-rag
+
+这个项目很适合学习：
+
+```text
+向量库里不仅存 embedding
+还存 metadata 关系
+通过 metadata 实现图遍历
+```
+
+例如你的游戏知识库可以这样存：
+
+```text
+chunk_id
+hero_name
+skill_name
+related_hero
+related_equipment
+counter_hero
+doc_id
+```
+
+然后先向量召回“孙权”，再根据 metadata 找到相关技能、装备、克制关系。([GitHub](https://github.com/datastax/graph-rag?utm_source=chatgpt.com))
+
+------
+
+### 3. LightRAG
+
+LightRAG 比较完整，适合学习整体框架：
+
+```text
+文档切块
+实体抽取
+关系抽取
+构建知识图
+低层检索：实体 / 关系
+高层检索：主题 / 社区
+向量检索 + 图检索融合
+```
+
+它比 Microsoft GraphRAG 更轻量，工程可读性更强。([GitHub](https://github.com/hkuds/lightrag?utm_source=chatgpt.com))
+
+------
+
+### 4. KG2RAG
+
+KG2RAG 的思路很适合改造成你的项目：
+
+```text
+第一步：普通向量检索，找到种子 chunk
+第二步：根据 KG 关系扩展相关 chunk
+第三步：把扩展后的 chunk 按关系组织起来
+第四步：送给 LLM 生成答案
+```
+
+比如游戏知识库里问：
+
+```text
+孙权适合出什么装备，为什么？
+```
+
+可以先召回“孙权技能”，再通过图关系扩展到：
+
+```text
+孙权 → 技能机制 → 伤害类型 → 推荐装备 → 适配理由
+```
+
+这比单纯 top-k 向量检索更稳定。([GitHub](https://github.com/nju-websoft/KG2RAG?utm_source=chatgpt.com))
+
+------
+
+## 按你的需求怎么选
+
+| 你的目标                             | 推荐项目                                        |
+| ------------------------------------ | ----------------------------------------------- |
+| **已有 Milvus，不想加图数据库**      | zilliztech/vector-graph-rag、DataStax graph-rag |
+| **想做轻量 GraphRAG 原型**           | LightRAG、nano-graphrag                         |
+| **想做标准 Microsoft GraphRAG 流程** | microsoft/graphrag                              |
+| **想接 Neo4j 图数据库**              | neo4j-graphrag-python、LlamaIndex GraphRAG      |
+| **想做知识图谱增强问答**             | KG2RAG、KAG                                     |
+| **想做多跳推理 / 关联记忆**          | HippoRAG                                        |
+| **想做多模态文档图谱 RAG**           | RAG-Anything                                    |
+
+RAG-Anything 也值得看，它是图驱动的多模态 RAG，能处理文本、图片、表格、公式等，并构建多模态知识图索引；如果你的知识库以后包含 PDF、表格、图像，它比普通 GraphRAG 更合适。([GitHub](https://github.com/hkuds/rag-anything?utm_source=chatgpt.com))
+
+------
+
+## 最推荐的学习顺序
+
+```text
+1. zilliztech/vector-graph-rag
+   ↓
+2. DataStax graph-rag
+   ↓
+3. LightRAG
+   ↓
+4. KG2RAG
+   ↓
+5. Microsoft GraphRAG / Neo4j GraphRAG
+```
+
+你的 Java + Milvus 项目里，最现实的落地路线是：
+
+```text
+Milvus dense 检索
++ Milvus sparse 检索
++ metadata 关系字段
++ 多跳扩展检索
++ RRF 融合
++ reranker 精排
++ adaptive-k 截断
+```
+
+这就是比较接近 **Vector Graph RAG** 的工程实现方式。
